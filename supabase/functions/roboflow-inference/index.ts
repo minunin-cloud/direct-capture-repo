@@ -51,11 +51,20 @@ serve(async (req) => {
       );
     }
 
-    // Construct Roboflow inference URL
-    // Format: https://detect.roboflow.com/{workspace}/{project}/{version}
-    const inferenceUrl = `${modelUrl}?api_key=${ROBOFLOW_API_KEY}`;
+    // Validate modelUrl format - should be like https://detect.roboflow.com/workspace/project/version
+    if (!modelUrl.includes('roboflow.com')) {
+      return new Response(
+        JSON.stringify({ 
+          error: 'Invalid model URL format',
+          hint: 'URL should be like: https://detect.roboflow.com/workspace/project/version'
+        }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
-    console.log('Calling Roboflow inference...');
+    // Construct Roboflow inference URL
+    const inferenceUrl = `${modelUrl}?api_key=${ROBOFLOW_API_KEY}`;
+    console.log('Calling Roboflow inference to:', modelUrl);
 
     const response = await fetch(inferenceUrl, {
       method: 'POST',
@@ -65,17 +74,51 @@ serve(async (req) => {
       body: imageBase64,
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Roboflow API error:', response.status, errorText);
+    // Get response as text first to debug HTML responses
+    const responseText = await response.text();
+    const contentType = response.headers.get('content-type') || '';
+
+    // Check if response is HTML (error page) instead of JSON
+    if (contentType.includes('text/html') || responseText.trim().startsWith('<!') || responseText.includes('<html')) {
+      console.error('Roboflow returned HTML instead of JSON. Status:', response.status);
+      console.error('Response preview:', responseText.substring(0, 300));
+      
+      let errorMessage = 'Roboflow API returned an error page';
+      if (response.status === 401 || response.status === 403) {
+        errorMessage = 'Invalid or missing Roboflow API key';
+      } else if (response.status === 404) {
+        errorMessage = 'Model not found. Check your model URL format (workspace/project/version)';
+      } else if (response.status === 429) {
+        errorMessage = 'Rate limited by Roboflow API';
+      }
+      
       return new Response(
-        JSON.stringify({ error: `Roboflow API error: ${response.status}`, details: errorText }),
+        JSON.stringify({ error: errorMessage, status: response.status }),
+        { status: response.status || 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (!response.ok) {
+      console.error('Roboflow API error:', response.status, responseText);
+      return new Response(
+        JSON.stringify({ error: `Roboflow API error: ${response.status}`, details: responseText }),
         { status: response.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    const result: RoboflowResponse = await response.json();
-    console.log(`Roboflow returned ${result.predictions.length} predictions in ${result.time}s`);
+    // Parse JSON from text
+    let result: RoboflowResponse;
+    try {
+      result = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error('Failed to parse Roboflow response:', responseText.substring(0, 200));
+      return new Response(
+        JSON.stringify({ error: 'Invalid JSON response from Roboflow', preview: responseText.substring(0, 100) }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    console.log(`Roboflow returned ${result.predictions?.length || 0} predictions`);
 
     // Transform predictions to our Detection format
     const detections = result.predictions.map((pred, index) => ({
