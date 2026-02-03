@@ -212,9 +212,34 @@ export function useCombatSystem(): UseCombatSystemReturn {
   const lastStateChangeRef = useRef<number>(Date.now());
   const lastPositionRef = useRef<PlayerPosition | null>(null);
   const stuckTimerRef = useRef<number>(0);
+  const previousTargetsRef = useRef<Set<number>>(new Set());
 
   const actionService = useActionService();
   const coordinateMapping = useCoordinateMapping();
+
+  // Track kills when targets disappear
+  const trackKills = useCallback((currentDetections: Detection[]) => {
+    const currentIds = new Set(currentDetections.map(d => d.id));
+    const previousIds = previousTargetsRef.current;
+    
+    // Count how many previous targets are now missing (killed)
+    let newKills = 0;
+    previousIds.forEach(id => {
+      if (!currentIds.has(id)) {
+        newKills++;
+      }
+    });
+    
+    if (newKills > 0) {
+      setCombatStats(prev => ({
+        ...prev,
+        killCount: prev.killCount + newKills,
+      }));
+    }
+    
+    // Update previous targets ref
+    previousTargetsRef.current = currentIds;
+  }, []);
 
   // Calculate distance between two points
   const calculateDistance = useCallback((
@@ -474,6 +499,14 @@ export function useCombatSystem(): UseCombatSystemReturn {
     // Prioritize all visible targets
     const prioritizedTargets = prioritizeTargets(detections, screenCenter);
     setNearbyTargets(prioritizedTargets);
+    
+    // Track kills - when targets disappear
+    const enemyDetections = detections.filter(d => 
+      ["enemy_nameplate", "mob", "enemy", "hostile"].some(type => 
+        d.type.toLowerCase().includes(type.toLowerCase())
+      )
+    );
+    trackKills(enemyDetections);
 
     // Find player character for position tracking
     const playerDetection = detections.find(d => 
@@ -671,6 +704,7 @@ export function useCombatSystem(): UseCombatSystemReturn {
     getAvailableSkill,
     executeAction,
     coordinateMapping,
+    trackKills,
   ]);
 
   const updateConfig = useCallback((newConfig: Partial<CombatConfig>) => {
