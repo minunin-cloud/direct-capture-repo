@@ -1,1 +1,4 @@
 project_id = "awwfiwtorvkjtbwkyekq"
+
+[functions.roboflow-inference]
+verify_jwt = false
