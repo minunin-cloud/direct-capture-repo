@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Monitor, MonitorOff, AlertCircle } from "lucide-react";
 import { useRoboflowInference, Detection } from "@/hooks/useRoboflowInference";
 import { useCombatSystem } from "@/hooks/useCombatSystem";
+import { useActionService } from "@/hooks/useActionService";
 import { RoboflowConfig } from "./RoboflowConfig";
 import { CombatLogicPanel } from "./CombatLogicPanel";
 import { CombatOverlay } from "./CombatOverlay";
@@ -52,7 +53,9 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
     lastInferenceTime,
   } = useRoboflowInference();
 
-  const combatSystem = useCombatSystem();
+  // Action service must be at the top level for stable hook order
+  const actionService = useActionService();
+  const combatSystem = useCombatSystem({ actionService });
 
   const startScreenCapture = useCallback(async () => {
     try {
