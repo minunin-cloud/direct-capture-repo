@@ -1,5 +1,5 @@
-import { useState, useCallback, useRef, useEffect } from "react";
-import { useActionService } from "./useActionService";
+import { useState, useCallback, useRef } from "react";
+import type { ActionServiceConfig } from "./useActionService";
 import { useCoordinateMapping } from "./useCoordinateMapping";
 
 // Detection from Roboflow
@@ -150,6 +150,23 @@ interface PlayerPosition {
   timestamp: number;
 }
 
+// Action service interface (passed in from parent)
+interface ActionServiceInterface {
+  isConnected: boolean;
+  lastError: string | null;
+  actionLog: { type: string; timestamp: number }[];
+  config: ActionServiceConfig;
+  sendMove: (x: number, y: number) => Promise<boolean>;
+  sendKeypress: (key: string) => Promise<boolean>;
+  testConnection: () => Promise<boolean>;
+  updateConfig: (config: Partial<ActionServiceConfig>) => void;
+  clearLog: () => void;
+}
+
+interface UseCombatSystemProps {
+  actionService: ActionServiceInterface;
+}
+
 interface UseCombatSystemReturn {
   // State
   combatState: CombatState;
@@ -174,7 +191,7 @@ interface UseCombatSystemReturn {
   };
   
   // Services
-  actionService: ReturnType<typeof useActionService>;
+  actionService: ActionServiceInterface;
   coordinateMapping: ReturnType<typeof useCoordinateMapping>;
   
   // Actions
@@ -191,7 +208,7 @@ interface UseCombatSystemReturn {
   setScreenCenter: (center: { x: number; y: number }) => void;
 }
 
-export function useCombatSystem(): UseCombatSystemReturn {
+export function useCombatSystem({ actionService }: UseCombatSystemProps): UseCombatSystemReturn {
   const [combatState, setCombatState] = useState<CombatState>("idle");
   const [currentTarget, setCurrentTarget] = useState<PrioritizedTarget | null>(null);
   const [nearbyTargets, setNearbyTargets] = useState<PrioritizedTarget[]>([]);
@@ -214,7 +231,6 @@ export function useCombatSystem(): UseCombatSystemReturn {
   const stuckTimerRef = useRef<number>(0);
   const previousTargetsRef = useRef<Set<number>>(new Set());
 
-  const actionService = useActionService();
   const coordinateMapping = useCoordinateMapping();
 
   // Track kills when targets disappear
