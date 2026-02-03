@@ -1,11 +1,12 @@
 import { cn } from "@/lib/utils";
 import { useEffect, useState, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Monitor, MonitorOff, AlertCircle, Activity } from "lucide-react";
+import { Monitor, MonitorOff, AlertCircle } from "lucide-react";
 import { useRoboflowInference, Detection } from "@/hooks/useRoboflowInference";
 import { useCombatSystem } from "@/hooks/useCombatSystem";
 import { RoboflowConfig } from "./RoboflowConfig";
 import { CombatLogicPanel } from "./CombatLogicPanel";
+import { CombatOverlay } from "./CombatOverlay";
 
 interface DetectionPreviewProps {
   isRunning: boolean;
@@ -36,6 +37,7 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
   const [showCombatPanel, setShowCombatPanel] = useState(true);
   
   const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const inferenceLoopRef = useRef<number | null>(null);
   const fpsCounterRef = useRef<number[]>([]);
@@ -124,26 +126,26 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
       return;
     }
 
-    let lastInferenceTime = 0;
+    let lastInferenceTimeLocal = 0;
     const minInterval = 200; // Max 5 FPS to respect API rate limits
 
     const runLoop = async () => {
-      if (!videoRef.current || !isRunning || !isCapturing) return;
+      if (!videoRef.current || !containerRef.current || !isRunning || !isCapturing) return;
 
       const now = performance.now();
       
       // Rate limit API calls
-      if (now - lastInferenceTime >= minInterval) {
-        lastInferenceTime = now;
+      if (now - lastInferenceTimeLocal >= minInterval) {
+        lastInferenceTimeLocal = now;
         
         // Run Roboflow inference
         const results = await runInference(videoRef.current);
         setDetections(results);
         setFrameCount(f => f + 1);
 
-        // Process combat logic
-        if (results.length > 0) {
-          combatSystem.processFrame(results, 100, { x: 50, y: 50 });
+        // Process combat logic with video and container refs
+        if (results.length > 0 && videoRef.current && containerRef.current) {
+          combatSystem.processFrame(results, videoRef.current, containerRef.current, 100);
         }
 
         // Calculate FPS
@@ -176,6 +178,20 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
     return "border-primary bg-primary/10";
   };
 
+  // Get target color based on isolation status
+  const getTargetColor = (detection: Detection) => {
+    const target = combatSystem.nearbyTargets.find(t => t.detection.id === detection.id);
+    if (!target) return getTypeColor(detection.type);
+    
+    if (target.isInDangerZone) {
+      return "border-destructive bg-destructive/20";
+    } else if (target.isIsolated) {
+      return "border-success bg-success/20";
+    } else {
+      return "border-warning bg-warning/20";
+    }
+  };
+
   return (
     <div className={cn("space-y-3", className)}>
       {/* Roboflow Config */}
@@ -187,7 +203,10 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
       />
 
       {/* Preview Container */}
-      <div className="relative aspect-video bg-secondary/30 rounded-lg border border-border overflow-hidden">
+      <div 
+        ref={containerRef}
+        className="relative aspect-video bg-secondary/30 rounded-lg border border-border overflow-hidden"
+      >
         {/* Video element for screen capture */}
         <video
           ref={videoRef}
@@ -209,33 +228,53 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
           </div>
         )}
 
+        {/* Combat Overlay - Lines, Danger Zones, Scan Radius */}
+        {isCapturing && (
+          <CombatOverlay
+            currentTarget={combatSystem.currentTarget}
+            nearbyTargets={combatSystem.nearbyTargets}
+            dangerZones={combatSystem.dangerZones}
+            playerPosition={combatSystem.playerPosition}
+            screenCenter={combatSystem.screenCenter}
+            safetyDistance={combatSystem.config.safetyDistance}
+            containerRef={containerRef}
+          />
+        )}
+
         {/* Detection boxes */}
-        {isCapturing && detections.map((det) => (
-          <div
-            key={det.id}
-            className={cn(
-              "absolute border-2 rounded transition-all duration-150",
-              getTypeColor(det.type),
-              combatSystem.currentTarget?.detection.id === det.id && "ring-2 ring-warning ring-offset-1"
-            )}
-            style={{
-              left: `${det.x}%`,
-              top: `${det.y}%`,
-              width: `${det.width}%`,
-              height: `${det.height}%`,
-            }}
-          >
-            {/* Label */}
-            <div className="absolute -top-5 left-0 px-1 py-0.5 text-[8px] font-mono font-bold bg-card rounded whitespace-nowrap">
-              {det.type} {det.confidence.toFixed(0)}%
+        {isCapturing && detections.map((det) => {
+          const isCurrentTarget = combatSystem.currentTarget?.detection.id === det.id;
+          
+          return (
+            <div
+              key={det.id}
+              className={cn(
+                "absolute border-2 rounded transition-all duration-150",
+                getTargetColor(det),
+                isCurrentTarget && "ring-2 ring-warning ring-offset-1 border-warning"
+              )}
+              style={{
+                left: `${det.x}%`,
+                top: `${det.y}%`,
+                width: `${det.width}%`,
+                height: `${det.height}%`,
+              }}
+            >
+              {/* Label */}
+              <div className="absolute -top-5 left-0 px-1 py-0.5 text-[8px] font-mono font-bold bg-card rounded whitespace-nowrap flex items-center gap-1">
+                {det.type} {det.confidence.toFixed(0)}%
+                {combatSystem.nearbyTargets.find(t => t.detection.id === det.id)?.isIsolated && (
+                  <span className="text-success">★</span>
+                )}
+              </div>
+              
+              {/* Center crosshair */}
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="w-1 h-1 rounded-full bg-current opacity-50" />
+              </div>
             </div>
-            
-            {/* Center crosshair */}
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="w-1 h-1 rounded-full bg-current opacity-50" />
-            </div>
-          </div>
-        ))}
+          );
+        })}
 
         {/* Center crosshair */}
         {isCapturing && (
@@ -286,7 +325,7 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
               className="gap-1 opacity-80 hover:opacity-100"
               onClick={() => setShowCombatPanel(!showCombatPanel)}
             >
-              <Activity className="w-4 h-4" />
+              Combat UI
             </Button>
             <Button
               size="sm"
@@ -316,6 +355,9 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
           <span>FPS: {fps}</span>
           <span>Latenz: {lastInferenceTime.toFixed(0)}ms</span>
           <span>Detections: <span className="text-primary font-bold">{detections.length}</span></span>
+          <span className={combatSystem.actionService.isConnected ? "text-success" : "text-destructive"}>
+            {combatSystem.actionService.isConnected ? "BRIDGE ✓" : "BRIDGE ✗"}
+          </span>
           <span className="text-success">ROBOFLOW</span>
         </div>
       )}
@@ -328,10 +370,15 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
           combatState={combatSystem.combatState}
           currentTarget={combatSystem.currentTarget}
           nearbyTargets={combatSystem.nearbyTargets}
+          dangerZones={combatSystem.dangerZones}
           combatStats={combatSystem.combatStats}
+          actionServiceConfig={combatSystem.actionService.config}
+          isActionServiceConnected={combatSystem.actionService.isConnected}
           onConfigChange={combatSystem.updateConfig}
           onSkillsChange={combatSystem.updateSkills}
           onResetStats={combatSystem.resetStats}
+          onActionServiceConfigChange={combatSystem.actionService.updateConfig}
+          onTestConnection={combatSystem.actionService.testConnection}
         />
       )}
     </div>
