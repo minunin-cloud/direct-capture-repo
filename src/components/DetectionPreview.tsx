@@ -1,9 +1,11 @@
 import { cn } from "@/lib/utils";
 import { useEffect, useState, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Monitor, MonitorOff, AlertCircle, Play, Pause } from "lucide-react";
-import { useObjectDetection, Detection } from "@/hooks/useObjectDetection";
-import { ModelLoader } from "./ModelLoader";
+import { Monitor, MonitorOff, AlertCircle, Activity } from "lucide-react";
+import { useRoboflowInference, Detection } from "@/hooks/useRoboflowInference";
+import { useCombatSystem } from "@/hooks/useCombatSystem";
+import { RoboflowConfig } from "./RoboflowConfig";
+import { CombatLogicPanel } from "./CombatLogicPanel";
 
 interface DetectionPreviewProps {
   isRunning: boolean;
@@ -20,7 +22,6 @@ const typeColors: Record<string, string> = {
   player_character: "border-cyan-400 bg-cyan-400/10",
   corpse: "border-muted-foreground bg-muted-foreground/10",
   resource_node: "border-emerald-500 bg-emerald-500/10",
-  // Fallbacks
   enemy: "border-destructive bg-destructive/10",
   friendly: "border-primary bg-primary/10",
   player: "border-cyan-400 bg-cyan-400/10",
@@ -32,22 +33,24 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
   const [fps, setFps] = useState(0);
   const [isCapturing, setIsCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
-  const [useSimulation, setUseSimulation] = useState(true);
+  const [showCombatPanel, setShowCombatPanel] = useState(true);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const inferenceLoopRef = useRef<number | null>(null);
-  const lastFrameTimeRef = useRef<number>(0);
   const fpsCounterRef = useRef<number[]>([]);
 
   const {
-    isModelLoaded,
-    isLoading: isModelLoading,
-    error: modelError,
-    loadModel,
+    isConfigured,
+    isLoading: isInferenceLoading,
+    error: inferenceError,
+    modelUrl,
+    setModelUrl,
     runInference,
-    classNames,
-  } = useObjectDetection();
+    lastInferenceTime,
+  } = useRoboflowInference();
+
+  const combatSystem = useCombatSystem();
 
   const startScreenCapture = useCallback(async () => {
     try {
@@ -111,9 +114,9 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
     };
   }, []);
 
-  // Real inference loop
+  // Inference loop with Roboflow
   useEffect(() => {
-    if (!isRunning || !isCapturing || !isModelLoaded || useSimulation) {
+    if (!isRunning || !isCapturing || !isConfigured) {
       if (inferenceLoopRef.current) {
         cancelAnimationFrame(inferenceLoopRef.current);
         inferenceLoopRef.current = null;
@@ -121,23 +124,35 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
       return;
     }
 
+    let lastInferenceTime = 0;
+    const minInterval = 200; // Max 5 FPS to respect API rate limits
+
     const runLoop = async () => {
       if (!videoRef.current || !isRunning || !isCapturing) return;
 
       const now = performance.now();
       
-      // Run inference
-      const results = await runInference(videoRef.current);
-      setDetections(results);
-      setFrameCount(f => f + 1);
+      // Rate limit API calls
+      if (now - lastInferenceTime >= minInterval) {
+        lastInferenceTime = now;
+        
+        // Run Roboflow inference
+        const results = await runInference(videoRef.current);
+        setDetections(results);
+        setFrameCount(f => f + 1);
 
-      // Calculate FPS
-      fpsCounterRef.current.push(now);
-      const oneSecondAgo = now - 1000;
-      fpsCounterRef.current = fpsCounterRef.current.filter(t => t > oneSecondAgo);
-      setFps(fpsCounterRef.current.length);
+        // Process combat logic
+        if (results.length > 0) {
+          combatSystem.processFrame(results, 100, { x: 50, y: 50 });
+        }
 
-      lastFrameTimeRef.current = now;
+        // Calculate FPS
+        fpsCounterRef.current.push(now);
+        const oneSecondAgo = now - 1000;
+        fpsCounterRef.current = fpsCounterRef.current.filter(t => t > oneSecondAgo);
+        setFps(fpsCounterRef.current.length);
+      }
+
       inferenceLoopRef.current = requestAnimationFrame(runLoop);
     };
 
@@ -149,71 +164,27 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
         inferenceLoopRef.current = null;
       }
     };
-  }, [isRunning, isCapturing, isModelLoaded, useSimulation, runInference]);
-
-  // Simulation mode for demo/testing
-  useEffect(() => {
-    if (!isRunning || !isCapturing || !useSimulation) {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      setFrameCount((f) => f + 1);
-      
-      const newDetections: Detection[] = [];
-      const numDetections = Math.floor(Math.random() * 4) + 1;
-      
-      for (let i = 0; i < numDetections; i++) {
-        const types = classNames.length > 0 ? classNames : ["enemy_nameplate", "loot", "mob", "player_character"];
-        newDetections.push({
-          id: i,
-          type: types[Math.floor(Math.random() * types.length)],
-          x: Math.random() * 70 + 5,
-          y: Math.random() * 60 + 10,
-          width: Math.random() * 15 + 10,
-          height: Math.random() * 20 + 15,
-          confidence: Math.random() * 30 + 70,
-        });
-      }
-      
-      setDetections(newDetections);
-      setFps(5); // Simulated FPS
-    }, 200);
-
-    return () => clearInterval(interval);
-  }, [isRunning, isCapturing, useSimulation, classNames]);
+  }, [isRunning, isCapturing, isConfigured, runInference, combatSystem]);
 
   const getTypeColor = (type: string) => {
-    return typeColors[type] || "border-primary bg-primary/10";
+    const lowerType = type.toLowerCase();
+    for (const [key, color] of Object.entries(typeColors)) {
+      if (lowerType.includes(key.toLowerCase())) {
+        return color;
+      }
+    }
+    return "border-primary bg-primary/10";
   };
 
   return (
     <div className={cn("space-y-3", className)}>
-      {/* Model Loader */}
-      <ModelLoader
-        isModelLoaded={isModelLoaded}
-        isLoading={isModelLoading}
-        error={modelError}
-        onLoadModel={loadModel}
+      {/* Roboflow Config */}
+      <RoboflowConfig
+        modelUrl={modelUrl}
+        onModelUrlChange={setModelUrl}
+        isConfigured={isConfigured}
+        error={inferenceError}
       />
-
-      {/* Simulation Toggle */}
-      {isModelLoaded && (
-        <div className="flex items-center justify-between p-2 bg-secondary/30 rounded-lg border border-border">
-          <span className="text-xs text-muted-foreground">
-            {useSimulation ? "Simulations-Modus" : "ML-Inferenz aktiv"}
-          </span>
-          <Button
-            size="sm"
-            variant={useSimulation ? "outline" : "default"}
-            className="h-6 text-xs gap-1"
-            onClick={() => setUseSimulation(!useSimulation)}
-          >
-            {useSimulation ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
-            {useSimulation ? "ML aktivieren" : "Simulation"}
-          </Button>
-        </div>
-      )}
 
       {/* Preview Container */}
       <div className="relative aspect-video bg-secondary/30 rounded-lg border border-border overflow-hidden">
@@ -244,7 +215,8 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
             key={det.id}
             className={cn(
               "absolute border-2 rounded transition-all duration-150",
-              getTypeColor(det.type)
+              getTypeColor(det.type),
+              combatSystem.currentTarget?.detection.id === det.id && "ring-2 ring-warning ring-offset-1"
             )}
             style={{
               left: `${det.x}%`,
@@ -294,24 +266,46 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
               variant="outline"
               className="gap-2"
               onClick={startScreenCapture}
+              disabled={!isConfigured}
             >
               <Monitor className="w-4 h-4" />
               Bildschirm aufnehmen
             </Button>
+            {!isConfigured && (
+              <p className="text-xs text-warning">Bitte zuerst Roboflow Model URL eingeben</p>
+            )}
           </div>
         )}
 
         {/* Stop capture button when capturing */}
         {isCapturing && (
-          <Button
-            size="sm"
-            variant="destructive"
-            className="absolute top-2 right-2 gap-2 opacity-80 hover:opacity-100"
-            onClick={stopScreenCapture}
-          >
-            <MonitorOff className="w-4 h-4" />
-            Stoppen
-          </Button>
+          <div className="absolute top-2 right-2 flex gap-2">
+            <Button
+              size="sm"
+              variant={showCombatPanel ? "default" : "outline"}
+              className="gap-1 opacity-80 hover:opacity-100"
+              onClick={() => setShowCombatPanel(!showCombatPanel)}
+            >
+              <Activity className="w-4 h-4" />
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              className="gap-2 opacity-80 hover:opacity-100"
+              onClick={stopScreenCapture}
+            >
+              <MonitorOff className="w-4 h-4" />
+              Stoppen
+            </Button>
+          </div>
+        )}
+
+        {/* Loading indicator */}
+        {isInferenceLoading && (
+          <div className="absolute top-2 left-2 flex items-center gap-2 px-2 py-1 bg-background/80 rounded text-xs">
+            <div className="w-2 h-2 rounded-full bg-warning animate-pulse" />
+            Inferenz...
+          </div>
         )}
       </div>
 
@@ -320,13 +314,25 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
         <div className="flex justify-between text-[10px] font-mono text-muted-foreground">
           <span>Frame: {frameCount}</span>
           <span>FPS: {fps}</span>
+          <span>Latenz: {lastInferenceTime.toFixed(0)}ms</span>
           <span>Detections: <span className="text-primary font-bold">{detections.length}</span></span>
-          <span className={cn(
-            useSimulation ? "text-warning" : "text-success"
-          )}>
-            {useSimulation ? "SIM" : "ML"}
-          </span>
+          <span className="text-success">ROBOFLOW</span>
         </div>
+      )}
+
+      {/* Combat Logic Panel */}
+      {showCombatPanel && (
+        <CombatLogicPanel
+          config={combatSystem.config}
+          skills={combatSystem.skills}
+          combatState={combatSystem.combatState}
+          currentTarget={combatSystem.currentTarget}
+          nearbyTargets={combatSystem.nearbyTargets}
+          combatStats={combatSystem.combatStats}
+          onConfigChange={combatSystem.updateConfig}
+          onSkillsChange={combatSystem.updateSkills}
+          onResetStats={combatSystem.resetStats}
+        />
       )}
     </div>
   );
