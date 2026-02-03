@@ -1,13 +1,15 @@
 import { cn } from "@/lib/utils";
 import { useEffect, useState, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Monitor, MonitorOff, AlertCircle } from "lucide-react";
+import { Monitor, MonitorOff, AlertCircle, Loader2, Wifi, WifiOff } from "lucide-react";
 import { useRoboflowInference, Detection } from "@/hooks/useRoboflowInference";
 import { useCombatSystem } from "@/hooks/useCombatSystem";
 import { useActionService } from "@/hooks/useActionService";
+import { useVisionState, getStatusMessage } from "@/hooks/useVisionState";
 import { RoboflowConfig } from "./RoboflowConfig";
 import { CombatLogicPanel } from "./CombatLogicPanel";
 import { CombatOverlay } from "./CombatOverlay";
+import { HPBar } from "./HPBar";
 
 interface DetectionPreviewProps {
   isRunning: boolean;
@@ -19,7 +21,11 @@ const typeColors: Record<string, string> = {
   friendly_nameplate: "border-primary bg-primary/10",
   enemy_hp_bar: "border-destructive bg-destructive/10",
   player_hp_bar: "border-success bg-success/10",
-  loot: "border-success bg-success/10",
+  "our-hp": "border-success bg-success/20",
+  "our_hp": "border-success bg-success/20",
+  mana: "border-blue-500 bg-blue-500/20",
+  loot: "border-yellow-500 bg-yellow-500/10",
+  ore: "border-amber-600 bg-amber-600/10",
   mob: "border-purple-500 bg-purple-500/10",
   player_character: "border-cyan-400 bg-cyan-400/10",
   corpse: "border-muted-foreground bg-muted-foreground/10",
@@ -43,6 +49,9 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
   const inferenceLoopRef = useRef<number | null>(null);
   const fpsCounterRef = useRef<number[]>([]);
 
+  // Vision state for HP/Mana tracking
+  const visionState = useVisionState();
+
   const {
     isConfigured,
     isLoading: isInferenceLoading,
@@ -60,8 +69,12 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
   const startScreenCapture = useCallback(async () => {
     try {
       setCaptureError(null);
+      visionState.setStatus("waiting_stream");
+      
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
+        video: {
+          frameRate: { ideal: 30, max: 60 },
+        },
         audio: false,
       });
       
@@ -73,6 +86,8 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
       }
       
       setIsCapturing(true);
+      visionState.setStreamActive(true);
+      visionState.setStatus("ready");
       
       stream.getVideoTracks()[0].onended = () => {
         stopScreenCapture();
@@ -86,9 +101,10 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
           setCaptureError("Fehler beim Starten der Bildschirmaufnahme");
         }
       }
+      visionState.setStatus("error", "Bildschirmaufnahme fehlgeschlagen");
       setIsCapturing(false);
     }
-  }, []);
+  }, [visionState]);
 
   const stopScreenCapture = useCallback(() => {
     if (inferenceLoopRef.current) {
@@ -105,7 +121,9 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
     setIsCapturing(false);
     setDetections([]);
     setFps(0);
-  }, []);
+    visionState.setStreamActive(false);
+    visionState.reset();
+  }, [visionState]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -140,22 +158,29 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
       // Rate limit API calls
       if (now - lastInferenceTimeLocal >= minInterval) {
         lastInferenceTimeLocal = now;
+        visionState.setStatus("inferencing");
         
         // Run Roboflow inference
         const results = await runInference(videoRef.current);
         setDetections(results);
         setFrameCount(f => f + 1);
+        
+        // Update vision state with detections (HP, Mana, entity categorization)
+        visionState.updateFromDetections(results);
 
-        // Process combat logic with video and container refs
+        // Process combat logic with video and container refs, using detected HP
         if (results.length > 0 && videoRef.current && containerRef.current) {
-          combatSystem.processFrame(results, videoRef.current, containerRef.current, 100);
+          combatSystem.processFrame(results, videoRef.current, containerRef.current, visionState.state.playerHp);
         }
 
         // Calculate FPS
         fpsCounterRef.current.push(now);
         const oneSecondAgo = now - 1000;
         fpsCounterRef.current = fpsCounterRef.current.filter(t => t > oneSecondAgo);
-        setFps(fpsCounterRef.current.length);
+        const currentFps = fpsCounterRef.current.length;
+        setFps(currentFps);
+        visionState.updateFps(currentFps);
+        visionState.setStatus("ready");
       }
 
       inferenceLoopRef.current = requestAnimationFrame(runLoop);
@@ -203,7 +228,38 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
         onModelUrlChange={setModelUrl}
         isConfigured={isConfigured}
         error={inferenceError}
+        isLoading={isInferenceLoading}
+        lastInferenceTime={lastInferenceTime}
       />
+
+      {/* Vision State Display - HP & Mana from Detection */}
+      {isCapturing && (
+        <div className="grid grid-cols-2 gap-3">
+          <HPBar
+            label="Spieler HP"
+            value={visionState.state.playerHp}
+            variant="player"
+          />
+          <div className="space-y-2">
+            <div className="flex justify-between items-center">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Mana
+              </span>
+              <span className="text-sm font-mono font-bold">
+                {visionState.state.playerMana.toFixed(0)}%
+              </span>
+            </div>
+            <div className="relative h-4 bg-secondary rounded-full overflow-hidden border border-border">
+              <div
+                className="absolute inset-y-0 left-0 rounded-full transition-all duration-500 ease-out bg-blue-500 shadow-[0_0_10px_hsl(210_100%_50%/0.5)]"
+                style={{ width: `${visionState.state.playerMana}%` }}
+              >
+                <div className="absolute inset-0 bg-gradient-to-b from-white/20 to-transparent" />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Preview Container */}
       <div 
@@ -300,7 +356,9 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
             ) : (
               <>
                 <Monitor className="w-8 h-8 text-muted-foreground" />
-                <p className="text-sm text-muted-foreground">Keine Bildschirmaufnahme aktiv</p>
+                <p className="text-sm text-muted-foreground">
+                  {getStatusMessage(visionState.state.status)}
+                </p>
               </>
             )}
             <Button
@@ -314,7 +372,7 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
               Bildschirm aufnehmen
             </Button>
             {!isConfigured && (
-              <p className="text-xs text-warning">Bitte zuerst Roboflow Model URL eingeben</p>
+              <p className="text-xs text-warning">Roboflow Modell wird automatisch konfiguriert...</p>
             )}
           </div>
         )}
@@ -342,26 +400,42 @@ export function DetectionPreview({ isRunning, className }: DetectionPreviewProps
           </div>
         )}
 
-        {/* Loading indicator */}
-        {isInferenceLoading && (
+        {/* Loading indicator with status */}
+        {isCapturing && (
           <div className="absolute top-2 left-2 flex items-center gap-2 px-2 py-1 bg-background/80 rounded text-xs">
-            <div className="w-2 h-2 rounded-full bg-warning animate-pulse" />
-            Inferenz...
+            {isInferenceLoading ? (
+              <>
+                <Loader2 className="w-3 h-3 animate-spin text-warning" />
+                <span className="text-warning">Analysiere...</span>
+              </>
+            ) : visionState.state.status === "ready" ? (
+              <>
+                <Wifi className="w-3 h-3 text-success" />
+                <span className="text-success">Vision aktiv</span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="w-3 h-3 text-muted-foreground" />
+                <span>{getStatusMessage(visionState.state.status)}</span>
+              </>
+            )}
           </div>
         )}
       </div>
 
       {/* Stats bar */}
       {isCapturing && (
-        <div className="flex justify-between text-[10px] font-mono text-muted-foreground">
+        <div className="flex flex-wrap justify-between gap-2 text-[10px] font-mono text-muted-foreground bg-secondary/30 rounded px-2 py-1">
           <span>Frame: {frameCount}</span>
-          <span>FPS: {fps}</span>
-          <span>Latenz: {lastInferenceTime.toFixed(0)}ms</span>
-          <span>Detections: <span className="text-primary font-bold">{detections.length}</span></span>
+          <span>FPS: <span className="text-primary">{fps}</span></span>
+          <span>Latenz: <span className="text-primary">{lastInferenceTime.toFixed(0)}ms</span></span>
+          <span>Enemies: <span className="text-destructive font-bold">{visionState.state.enemies.length}</span></span>
+          <span>Resources: <span className="text-amber-500 font-bold">{visionState.state.resources.length}</span></span>
+          <span>Loot: <span className="text-yellow-500 font-bold">{visionState.state.loot.length}</span></span>
           <span className={combatSystem.actionService.isConnected ? "text-success" : "text-destructive"}>
             {combatSystem.actionService.isConnected ? "BRIDGE ✓" : "BRIDGE ✗"}
           </span>
-          <span className="text-success">ROBOFLOW</span>
+          <span className="text-success">ROBOFLOW ✓</span>
         </div>
       )}
 
